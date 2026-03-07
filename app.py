@@ -105,6 +105,11 @@ with st.sidebar:
         value=45.0, step=1.0, format="%.1f",
         help="Maximum scan angle from boresight."
     )
+    theta_g_deg = st.number_input(
+        "Grating Lobe Margin Angle (°)", min_value=0.0, max_value=90.0,
+        value=47.0, step=1.0, format="%.1f",
+        help="Angle slightly beyond scan edge to avoid grating lobes."
+    )
     G_min_dBi = st.number_input(
         "Min Gain over Scan Range (dBi)", min_value=0.0, max_value=60.0,
         value=20.0, step=0.5, format="%.1f",
@@ -117,22 +122,22 @@ with st.sidebar:
     )
     antenna_loss_dB = st.number_input(
         "Front-end / Antenna Loss (dB)", min_value=0.0, max_value=10.0,
-        value=0.0, step=0.1, format="%.1f",
+        value=0.5, step=0.1, format="%.1f",
         help="Includes mismatch, polarization, insertion losses."
     )
     pointing_error_loss_dB = st.number_input(
         "Pointing Error Loss (dB)", min_value=0.0, max_value=5.0,
         value=0.0, step=0.1, format="%.1f"
     )
-    implementation_margin_dB = st.number_input(
-        "Implementation Margin (dB)", min_value=0.0, max_value=5.0,
-        value=0.0, step=0.1, format="%.1f",
-        help="Margin for thermal, failures, amp/phase errors (typ. 0.5–1 dB)."
-    )
     loss_beam_diameter_dB = st.number_input(
         "Loss over Beam Diameter (dB)", min_value=0.0, max_value=5.0,
-        value=0.0, step=0.5, format="%.1f",
+        value=3.0, step=0.5, format="%.1f",
         help="Typically 3 dB if full beam, 0 dB if beam-peak only."
+    )
+    implementation_margin_dB = st.number_input(
+        "Implementation Margin (dB)", min_value=0.0, max_value=5.0,
+        value=0.5, step=0.1, format="%.1f",
+        help="Margin for thermal, failures, amp/phase errors (typ. 0.5–1 dB)."
     )
 
     st.markdown("---")
@@ -151,6 +156,7 @@ lambda_low = c / f_low                 # longest wavelength (lowest freq)
 lambda_high = c / f_high               # shortest wavelength (highest freq) — for grating lobes
 
 theta_max_rad = math.radians(theta_max_deg)
+theta_g_rad = math.radians(theta_g_deg)
 eta = eta_element / 100.0              # element efficiency as fraction
 
 # ── Illumination taper efficiency (parabolic on pedestal, n=1) ──
@@ -176,17 +182,14 @@ D_peak_dBi = (G_min_dBi + antenna_loss_dB + scan_loss_dB +
 D_peak_linear = 10.0 ** (D_peak_dBi / 10.0)
 
 # ── Part B: Element Spacing & Element Gain ──────────────────
-# Square lattice grating-lobe-free condition (Eq 1 with θ_G = 90°):
+# Square lattice grating-lobe-free condition (Eq 1 with θ_G):
 #   d / λ_h  ≤  1 / (sin θ_sm + sin θ_G)
-# For θ_G = 90°: d ≤ λ_h / (1 + sin θ_sm)
-# Use highest frequency wavelength for worst case.
-
-d_over_lambda = 1.0 / (1.0 + math.sin(theta_max_rad))
+d_over_lambda = 1.0 / (math.sin(theta_max_rad) + math.sin(theta_g_rad))
 d_spacing = d_over_lambda * lambda_high          # physical spacing (m)
 d_spacing_mm = d_spacing * 1000.0
 
 # Element directivity (Eq 3 — unit cell area, lowest freq for directivity)
-A_cell = d_spacing ** 2                           # square lattice unit cell
+A_cell = d_spacing ** 2                            # square lattice unit cell
 D_el_linear = eta * 4.0 * math.pi * A_cell / (lambda_low ** 2)
 D_el_dBi = 10.0 * math.log10(D_el_linear)
 
@@ -198,7 +201,7 @@ N_required = 10.0 ** (0.1 * D_peak_dBi - 0.1 * D_el_dBi)
 N_side = math.ceil(math.sqrt(N_required))
 N_total = N_side * N_side
 
-L_aperture = N_side * d_spacing                   # total aperture side (m)
+L_aperture = N_side * d_spacing                    # total aperture side (m)
 L_aperture_mm = L_aperture * 1000.0
 
 # Actual achieved peak directivity with N_total elements
@@ -212,14 +215,12 @@ D_scan_dBi = D_actual_dBi - scan_loss_dB
 G_scan_dBi = D_scan_dBi - antenna_loss_dB - pointing_error_loss_dB - implementation_margin_dB - loss_beam_diameter_dB
 
 # Grating lobe locations
-# For square lattice at boresight: GL at arcsin(λ/d)
 gl_ratio = lambda_high / d_spacing
 if gl_ratio <= 1.0:
     gl_boresight_deg = math.degrees(math.asin(gl_ratio))
 else:
     gl_boresight_deg = 90.0
 
-# At max scan: GL at arcsin(λ/d - sin(θ_sm))
 gl_scan_arg = lambda_high / d_spacing - math.sin(theta_max_rad)
 if -1.0 <= gl_scan_arg <= 1.0:
     gl_scan_deg = math.degrees(math.asin(gl_scan_arg))
@@ -230,6 +231,9 @@ else:
 # θ_3 ≈ 0.886 λ / L  (radians) for uniform illumination
 hpbw_rad = 0.886 * lambda_nom / L_aperture
 hpbw_deg = math.degrees(hpbw_rad)
+
+# First Sidelobe Level (Uniform square aperture)
+first_sidelobe_dB = -13.26
 
 # ───────────────────────────────────────────────────────────────
 # TITLE
@@ -253,7 +257,7 @@ st.info(
     f"**Calculation:** Dₚ = G_min + Lₛ + SL + GL_pe + T_L + X + Iₘ  \n"
     f"= {G_min_dBi} + {antenna_loss_dB} + {scan_loss_dB:.2f} + {pointing_error_loss_dB} "
     f"+ {taper_loss_dB:.2f} + {loss_beam_diameter_dB} + {implementation_margin_dB}  \n"
-    f"= **{D_peak_dBi:.2f} dBi**  \n\n"
+    f"= **{D_peak_dBi:.2f} dBi** \n\n"
     f"Scan loss uses SL = 10·log₁₀(cos^{n_scan:.1f}(θ)) with θ_max = {theta_max_deg}°."
 )
 
@@ -271,12 +275,11 @@ col_b3.metric("Element Directivity Dₑ", f"{D_el_dBi:.2f} dBi")
 col_b4.metric("λ_high (mm)", f"{lambda_high*1000:.2f}")
 
 st.info(
-    f"**Grating-lobe-free condition (square lattice, θ_G = 90°):**  \n"
-    f"d / λ_h ≤ 1 / (1 + sin θ_sm) = 1 / (1 + sin {theta_max_deg}°) = **{d_over_lambda:.4f}**  \n"
-    f"d = {d_over_lambda:.4f} × {lambda_high*1000:.2f} mm = **{d_spacing_mm:.2f} mm**  \n\n"
-    f"**Element directivity:** Dₑ = η_e · 4π·d² / λ_low² = "
-    f"{eta:.2f} × 4π × ({d_spacing_mm:.2f})² / ({lambda_low*1000:.2f})² → **{D_el_dBi:.2f} dBi**  \n"
-    f"(Using λ_low = c/f_low for worst-case directivity at lowest frequency)"
+    f"**Grating-lobe-free condition (square lattice):** \n"
+    f"d / λ_h ≤ 1 / (sin θ_sm + sin θ_G) = 1 / (sin {theta_max_deg}° + sin {theta_g_deg}°) = **{d_over_lambda:.4f}** \n"
+    f"d = {d_over_lambda:.4f} × {lambda_high*1000:.2f} mm = **{d_spacing_mm:.2f} mm** \n\n"
+    f"**Element directivity:** Dₑ = 10·log₁₀(η_e · 4π · (d/λ_low)²) = "
+    f"10·log₁₀({eta:.2f} × 4π × ({d_spacing_mm/1000:.4f}/{lambda_low:.4f})²) → **{D_el_dBi:.2f} dBi**"
 )
 
 st.markdown("---")
@@ -296,14 +299,14 @@ col_c5, col_c6, col_c7, col_c8 = st.columns(4)
 col_c5.metric("Achieved Dₚ (boresight)", f"{D_actual_dBi:.2f} dBi")
 col_c6.metric("Directivity @ scan edge", f"{D_scan_dBi:.2f} dBi")
 col_c7.metric("Gain @ scan edge", f"{G_scan_dBi:.2f} dBi")
-col_c8.metric("HPBW (boresight)", f"{hpbw_deg:.2f}°")
+col_c8.metric("First Sidelobe Level", f"{first_sidelobe_dB} dB")
 
 st.info(
     f"**N** = 10^(0.1·Dₚ − 0.1·Dₑ) = 10^(0.1×{D_peak_dBi:.2f} − 0.1×{D_el_dBi:.2f}) "
-    f"= **{N_required:.1f}**  \n"
-    f"Square array: N_side = ⌈√{N_required:.1f}⌉ = **{N_side}** → N_total = {N_side}² = **{N_total}**  \n"
+    f"= **{N_required:.1f}** \n"
+    f"Square array: N_side = ⌈√{N_required:.1f}⌉ = **{N_side}** → N_total = {N_side}² = **{N_total}** \n"
     f"Aperture = {N_side} × {d_spacing_mm:.2f} mm = **{L_aperture_mm:.1f} mm** per side  \n"
-    f"GL at boresight: **{gl_boresight_deg:.1f}°** · GL at {theta_max_deg}° scan: **{gl_scan_deg:.1f}°**"
+    f"First Sidelobe Level for uniform square aperture is **{first_sidelobe_dB} dB**."
 )
 
 # ───────────────────────────────────────────────────────────────
@@ -333,53 +336,38 @@ def style_ax(ax, title="", xlabel="", ylabel=""):
 # ── Array Factor computation ────────────────────────────────
 @st.cache_data
 def compute_array_factor(N_side, d_m, wavelength, scan_deg, theta_range_deg):
-    """
-    Compute the normalized array factor (dB) for a uniform square planar array.
-    Uses the product of two linear array factors (separable).
-    AF_linear(θ) = sin(N·ψ/2) / (N·sin(ψ/2))
-    ψ = k·d·(sin θ - sin θ_s)
-    """
     theta_rad = np.radians(theta_range_deg)
     scan_rad = np.radians(scan_deg)
     k = 2.0 * np.pi / wavelength
 
     psi = k * d_m * (np.sin(theta_rad) - np.sin(scan_rad))
 
-    # Avoid division by zero
     half_psi = psi / 2.0
     N = N_side
     numerator = np.sin(N * half_psi)
     denominator = N * np.sin(half_psi)
 
-    # Handle zeros
     with np.errstate(divide='ignore', invalid='ignore'):
         af = np.where(np.abs(denominator) < 1e-12, 1.0, numerator / denominator)
 
-    af_power = np.abs(af) ** 2  # one dimension; for square array: AF² = AF_x² × AF_y²
-    # For the principal E-plane cut (φ=0), the y-factor is 1 at θ=0 for uniform square array
-    # So the pattern in this cut is just the single-axis AF.
+    af_power = np.abs(af) ** 2
     af_power_db = 10.0 * np.log10(np.maximum(af_power, 1e-15))
 
     return af_power_db
-
 
 theta_range = np.linspace(-90, 90, 3601)
 
 af_boresight = compute_array_factor(N_side, d_spacing, lambda_nom, 0.0, theta_range)
 af_scanned = compute_array_factor(N_side, d_spacing, lambda_nom, theta_max_deg, theta_range)
 
-# Add element pattern: cos^1.5 for patch
 element_pattern_dB = 10.0 * np.log10(np.maximum(np.cos(np.radians(theta_range)) ** n_scan, 1e-15))
 
-# Total pattern = element pattern + AF (in dB)
 total_boresight = af_boresight + element_pattern_dB
 total_scanned = af_scanned + element_pattern_dB
 
-# Scale to peak directivity
-total_boresight_dBi = total_boresight + D_actual_dBi  # peak of AF is 0 dB at scan
+total_boresight_dBi = total_boresight + D_actual_dBi
 total_scanned_dBi = total_scanned + D_actual_dBi
 
-# Clip for display
 y_floor = -40
 total_boresight_clipped = np.clip(total_boresight, y_floor, 0)
 total_scanned_clipped = np.clip(total_scanned, y_floor, 0)
@@ -394,7 +382,7 @@ style_ax(ax1, "Normalized Pattern — Boresight Beam", "θ (degrees)", "Normaliz
 ax1.plot(theta_range, total_boresight_clipped, color=C_LINE1, linewidth=1.0, label="Boresight")
 ax1.set_xlim(-90, 90)
 ax1.set_ylim(y_floor, 3)
-ax1.axhline(-3, color=C_ACCENT, linestyle='--', linewidth=0.7, alpha=0.7, label="-3 dB")
+ax1.axhline(first_sidelobe_dB, color=C_ACCENT, linestyle='--', linewidth=0.7, alpha=0.7, label=f"1st SLL ({first_sidelobe_dB} dB)")
 ax1.legend(fontsize=8, facecolor=C_BG, edgecolor=C_GRID, labelcolor=C_TEXT)
 
 # ── Plot 2: Radiation pattern — Scanned beam ─────────────
@@ -432,12 +420,10 @@ for spine in ax4.spines.values():
     spine.set_color(C_GRID)
 ax4.set_aspect('equal')
 
-# Generate element positions (centered at origin)
 positions_1d = np.arange(N_side) * d_spacing_mm
 positions_1d -= positions_1d.mean()  # center
 xx, yy = np.meshgrid(positions_1d, positions_1d)
 
-# Draw circles for each element
 radius_mm = d_spacing_mm * 0.38
 for xi, yi in zip(xx.ravel(), yy.ravel()):
     circle = plt.Circle((xi, yi), radius_mm, fill=True,
@@ -452,7 +438,6 @@ ax4.set_xlim(positions_1d[0] - margin, positions_1d[-1] + margin)
 ax4.set_ylim(positions_1d[0] - margin, positions_1d[-1] + margin)
 ax4.grid(True, color=C_GRID, alpha=0.3, linewidth=0.3)
 
-# Annotation
 ax4.text(0.02, 0.98, f"N = {N_total} ({N_side}×{N_side})\n"
          f"d = {d_spacing_mm:.2f} mm\n"
          f"L = {L_aperture_mm:.1f} mm",
@@ -476,7 +461,6 @@ for ax_p, data, title, color in [
 ]:
     ax_p.set_facecolor(C_BG)
     theta_plot = np.radians(theta_range)
-    # Map dB to radial: r = (data - floor) so 0 dB is outermost
     r = data - y_floor
     ax_p.plot(theta_plot, r, color=color, linewidth=0.8)
     ax_p.fill_between(theta_plot, 0, r, alpha=0.15, color=color)
@@ -487,7 +471,6 @@ for ax_p, data, title, color in [
     ax_p.tick_params(colors=C_TEXT, labelsize=7)
     ax_p.set_rlabel_position(60)
     ax_p.grid(True, color=C_GRID, alpha=0.4)
-    # Ring labels
     r_ticks = np.array([0, 10, 20, 30, 40])
     ax_p.set_rticks(r_ticks)
     ax_p.set_yticklabels([f"{int(v + y_floor)}" for v in r_ticks], fontsize=7, color=C_TEXT)
@@ -521,6 +504,7 @@ summary_data = {
         "Directivity at Scan Edge",
         "Gain at Scan Edge",
         "HPBW (boresight)",
+        "First Sidelobe (Square Aperture)",
         "Grating Lobe @ Boresight",
         "Grating Lobe @ Max Scan",
         f"Aperture Size",
@@ -545,6 +529,7 @@ summary_data = {
         f"{D_scan_dBi:.2f} dBi",
         f"{G_scan_dBi:.2f} dBi",
         f"{hpbw_deg:.2f}°",
+        f"{first_sidelobe_dB} dB",
         f"{gl_boresight_deg:.1f}°",
         f"{gl_scan_deg:.1f}°",
         f"{L_aperture_mm:.1f} × {L_aperture_mm:.1f} mm ({L_aperture*100:.2f} × {L_aperture*100:.2f} cm)",
