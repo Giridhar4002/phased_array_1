@@ -555,6 +555,7 @@ st.table(df_summary.style.hide_index())
 # ───────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption(
-    
+    "**Equations:** S. K. Rao & C. Ostroot, _IEEE Antennas & Propagation Magazine_, Apr 2020 · "
+    "S. Kotta & G. Gupta, _PA Antenna Design and Analysis Tool_, WAMS 2023  \n"
     "**CICAD 2025 Internship Assignment** — Phased Array Problem 1"
 )
