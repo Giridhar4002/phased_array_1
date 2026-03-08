@@ -548,7 +548,7 @@ summary_data = {
 
 import pandas as pd
 df_summary = pd.DataFrame(summary_data)
-st.table(df_summary.style.hide_index())
+st.table(df_summary)
 
 # ───────────────────────────────────────────────────────────────
 # FOOTER
