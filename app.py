@@ -1,4 +1,5 @@
 
+
 """
 Phased Array Antenna Design Tool — CICAD 2025 Problem 1
 =========================================================
@@ -248,9 +249,14 @@ first_sidelobe_dB = -13.26
 # ───────────────────────────────────────────────────────────────
 # TITLE
 # ───────────────────────────────────────────────────────────────
-st.markdown("# 📡 Phased Array Problem 1")
-st.markdown("Frequency = 14.5 ± 1 GHz (13.5 -15.5 GHz), Square grid, Square aperture, Microstrip patch antenna (ηe = 90%), Max scan angle = 45◦, Minimum gain over
-scan range = 20 dBi, Uniform illumination.")
+st.markdown("# Phased Array Problem 1")
+st.markdown("**Given Parameters**")
+st.markdown(
+    "Specifications: Frequency = 14.5 ± 1 GHz (13.5 - 15.5 GHz), "
+    "Square grid, Square aperture, Microstrip patch antenna (ηe = 90%), "
+    "Max scan angle = 45◦, Minimum gain over scan range = 20 dBi, "
+    "Uniform illumination."
+)
 st.markdown("---")
 
 # ───────────────────────────────────────────────────────────────
