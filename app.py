@@ -248,8 +248,9 @@ first_sidelobe_dB = -13.26
 # ───────────────────────────────────────────────────────────────
 # TITLE
 # ───────────────────────────────────────────────────────────────
-st.markdown("# 📡 Phased Array Antenna Design Tool")
-st.markdown("**CICAD 2025 — Assignment Problem 1** · Square Grid · Microstrip Patch · 14.5 GHz ± 1 GHz")
+st.markdown("# 📡 Phased Array Problem 1")
+st.markdown("Frequency = 14.5 ± 1 GHz (13.5 -15.5 GHz), Square grid, Square aperture, Microstrip patch antenna (ηe = 90%), Max scan angle = 45◦, Minimum gain over
+scan range = 20 dBi, Uniform illumination.")
 st.markdown("---")
 
 # ───────────────────────────────────────────────────────────────
