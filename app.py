@@ -1,3 +1,4 @@
+
 """
 Phased Array Antenna Design Tool — CICAD 2025 Problem 1
 =========================================================
@@ -29,32 +30,35 @@ st.set_page_config(
 )
 
 # ───────────────────────────────────────────────────────────────
-# CUSTOM CSS for polished look
+# CUSTOM CSS for polished, light look
 # ───────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=DM+Sans:wght@400;500;700&display=swap');
 
     /* Main container */
-    .block-container { max-width: 1200px; padding-top: 1.5rem; }
+    .block-container {
+        max-width: 1200px;
+        padding-top: 1.5rem;
+    }
 
     /* Metric cards */
     div[data-testid="stMetric"] {
-        background: linear-gradient(135deg, #0f1923 0%, #1a2a3a 100%);
-        border: 1px solid #2a4a6a;
+        background: linear-gradient(135deg, #f9fbff 0%, #e3edf9 100%);
+        border: 1px solid #d0d8e8;
         border-radius: 12px;
         padding: 16px 20px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        box-shadow: 0 4px 16px rgba(15, 25, 35, 0.08);
     }
     div[data-testid="stMetric"] label {
-        color: #7eb8da !important;
+        color: #48658c !important;
         font-family: 'DM Sans', sans-serif !important;
         font-size: 0.82rem !important;
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
     div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-        color: #e8f4fd !important;
+        color: #132033 !important;
         font-family: 'JetBrains Mono', monospace !important;
         font-size: 1.6rem !important;
         font-weight: 700;
@@ -62,20 +66,26 @@ st.markdown("""
 
     /* Sidebar */
     section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0a1628 0%, #0f1f35 100%);
+        background: linear-gradient(180deg, #f5f7fb 0%, #e6edf7 100%);
     }
     section[data-testid="stSidebar"] .stMarkdown h1,
     section[data-testid="stSidebar"] .stMarkdown h2,
     section[data-testid="stSidebar"] .stMarkdown h3 {
-        color: #7eb8da;
+        color: #27436b;
         font-family: 'DM Sans', sans-serif;
     }
 
     /* Headers */
-    h1, h2, h3, h4 { font-family: 'DM Sans', sans-serif !important; }
+    h1, h2, h3, h4 {
+        font-family: 'DM Sans', sans-serif !important;
+        color: #132033;
+    }
 
     /* Expander / section headers */
-    .stExpander { border: 1px solid #2a4a6a; border-radius: 10px; }
+    .stExpander {
+        border: 1px solid #d0d8e8;
+        border-radius: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -313,14 +323,14 @@ st.info(
 # PLOTS
 # ───────────────────────────────────────────────────────────────
 
-# Color palette
-C_BG = "#0b1622"
-C_GRID = "#1c2f44"
-C_LINE1 = "#00d4ff"
+# Color palette (light theme)
+C_BG = "#ffffff"
+C_GRID = "#dde3ee"
+C_LINE1 = "#0052cc"
 C_LINE2 = "#ff6b6b"
-C_LINE3 = "#4ecdc4"
-C_TEXT = "#b0cfe0"
-C_ACCENT = "#ffd93d"
+C_LINE3 = "#2f9e44"
+C_TEXT = "#334155"
+C_ACCENT = "#f59e0b"
 
 def style_ax(ax, title="", xlabel="", ylabel=""):
     """Apply consistent dark styling to an axis."""
