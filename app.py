@@ -1,834 +1,560 @@
-"""
-================================================================================
-CICAD 2025 — Phased Array Antenna Design & Analysis Tool
-================================================================================
-Problem 2: Hexagonal-grid phased array at 44.5 GHz ± 1 GHz
-  • Potter horn elements, circular aperture, 10 dB amplitude taper
-  • ±9° scan, 40 dBi minimum gain over coverage
-  • Part D: complexity reduction at ±6° scan
 
-================================================================================
+"""
+Phased Array Antenna Design Tool — CICAD 2025 Problem 1
+=========================================================
+Solves the design of a square-grid, square-aperture phased array
+with microstrip patch elements at 14.5 GHz ± 1 GHz.
+
+Equations follow:
+  S. Rao & C. Ostroot, "Design Principles and Guidelines for
+  Phased Array and Reflector Antennas," IEEE AP-Mag, Apr 2020.
 """
 
 import streamlit as st
 import numpy as np
+import math
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.collections import PatchCollection
-import math
+from matplotlib.gridspec import GridSpec
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Constants
-# ──────────────────────────────────────────────────────────────────────────────
-C_LIGHT = 0.299792458  # speed of light in m/ns  →  gives λ in metres when f in GHz
-PI = np.pi
+# ── physical constants ──────────────────────────────────────────
+c = 299792458.0  # speed of light, m/s
 
-# Radiating-element beamwidth constant A (degrees) — Eq. (7)
-ELEMENT_BW_CONSTANTS = {
-    "High-efficiency Multimode Horn": 63,
-    "Potter Horn": 70,
-    "Corrugated Horn": 75,
-    "Cup-dipole Radiating Element": 58,
-    "Dominant-mode Square Horn": 55,
-    "High-efficiency Square/Rectangular Horn": 52,
-    "Patch Antenna": 58,
-    "Dipole": 58,
-}
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Helper functions
-# ──────────────────────────────────────────────────────────────────────────────
-
-def wavelength_m(freq_ghz: float) -> float:
-    """Return free-space wavelength in metres for a frequency in GHz."""
-    return C_LIGHT / freq_ghz
-
-
-def taper_efficiency(T_dB: float) -> float:
-    """
-    Aperture-illumination efficiency η for parabolic-on-pedestal taper.
-    Eq. (10):  η = 75 · (1+T)² / (1+T+T²)   [%]
-    where T = 10^(−taper_dB / 20)  is the linear pedestal voltage.
-    Returns fractional efficiency (0–1).
-    """
-    T_lin = 10 ** (-abs(T_dB) / 20.0)
-    eta_pct = 75.0 * (1 + T_lin) ** 2 / (1 + T_lin + T_lin ** 2)
-    return eta_pct / 100.0
-
-
-def hex_element_spacing(lambda_h: float, theta_sm_deg: float,
-                        theta_G_deg: float) -> float:
-    """
-    Max element spacing for hexagonal lattice — Eq. (2):
-        d_h / λ_h  ≤  1.1547 / (sin θ_sm + sin θ_G)
-    Returns spacing in metres.
-    """
-    sin_sum = math.sin(math.radians(theta_sm_deg)) + math.sin(math.radians(theta_G_deg))
-    d_over_lambda = 1.1547 / sin_sum
-    return d_over_lambda * lambda_h, d_over_lambda
-
-
-def square_element_spacing(lambda_h: float, theta_sm_deg: float,
-                           theta_G_deg: float) -> float:
-    """
-    Max element spacing for square lattice — Eq. (1):
-        d_s / λ_h  ≤  1 / (sin θ_sm + sin θ_G)
-    """
-    sin_sum = math.sin(math.radians(theta_sm_deg)) + math.sin(math.radians(theta_G_deg))
-    d_over_lambda = 1.0 / sin_sum
-    return d_over_lambda * lambda_h, d_over_lambda
-
-
-def element_directivity_dBi(eta_e: float, spacing_m: float,
-                            lambda_l: float) -> float:
-    """
-    Element directivity — Eq. (3) component:
-        D_e = η_e · 4π · A_e / λ_l²
-    For hexagonal lattice the unit-cell area is A_e = (√3/2)·d².
-    lambda_l is the wavelength at the *lowest* frequency (governs directivity).
-    """
-    A_e = (math.sqrt(3) / 2.0) * spacing_m ** 2
-    D_lin = eta_e * 4.0 * PI * A_e / lambda_l ** 2
-    return 10.0 * math.log10(D_lin), D_lin, A_e
-
-
-def scan_loss_dB(theta_sm_deg: float, spacing_norm: float,
-                 element_bw_const: float) -> float:
-    """
-    Scan loss — Eq. (6) for directive elements (d/λ > 1):
-        SL = 3 · (θ_sm / (0.5·θ_3))²
-    where θ_3 = A · (λ_h / d_e) = A / (d/λ).
-    For d/λ < 1 use cos^n model Eq. (8) with n = 1.5.
-    """
-    if spacing_norm >= 1.0:
-        theta_3 = element_bw_const / spacing_norm  # degrees
-        sl = 3.0 * (theta_sm_deg / (0.5 * theta_3)) ** 2
-    else:
-        n = 1.5
-        sl = -10.0 * math.log10(math.cos(math.radians(theta_sm_deg)) ** n)
-    return sl
-
-
-def grating_lobe_angle(theta_sm_deg: float) -> float:
-    """
-    Select grating-lobe placement just outside scan region.
-    Design rules used:
-        θ_sm ≤ 15°  → θ_G = θ_sm + 1
-        θ_sm ≤ 45°  → θ_G = θ_sm + 2
-        θ_sm > 60°  → θ_G = θ_sm + 5
-    """
-    if theta_sm_deg <= 15:
-        return theta_sm_deg + 1.0
-    elif theta_sm_deg <= 45:
-        return theta_sm_deg + 2.0
-    else:
-        return theta_sm_deg + 5.0
-
-
-def peak_directivity_dBi(G_min_dBi: float, SL_dB: float, TL_dB: float,
-                         L_s_dB: float, GL_pe_dB: float, X_dB: float,
-                         I_m_dB: float) -> float:
-    """
-    Required peak directivity — Eq. (5):
-        D_p = G_min + L_s + SL + GL_pe + T_L + X + I_m
-    All values in dB.
-    """
-    return G_min_dBi + L_s_dB + SL_dB + GL_pe_dB + TL_dB + X_dB + I_m_dB
-
-
-def num_elements(Dp_dBi: float, De_dBi: float) -> float:
-    """
-    Number of elements — Eq. (4):
-        N = 10^(0.1·D_p − 0.1·D_e)
-    """
-    return 10 ** (0.1 * Dp_dBi - 0.1 * De_dBi)
-
-
-def array_directivity_dBi(N: int, eta_taper: float, De_lin: float) -> float:
-    """
-    Recalculate exact directivity from integer N — Eq. (3):
-        D_p = 10·log10[η_taper · N · D_e_lin]
-    """
-    return 10.0 * math.log10(eta_taper * N * De_lin)
-
-
-def generate_hex_grid_circular(d_m: float, R_m: float):
-    """
-    Generate element positions on a hexagonal grid inside a circle of radius R_m.
-    Returns arrays (x, y) in metres.
-    """
-    # Row spacing for hex grid
-    dy = d_m * math.sqrt(3) / 2.0
-    dx = d_m
-
-    # Determine grid bounds
-    n_rows = int(math.ceil(R_m / dy)) + 1
-    positions = []
-    for row in range(-n_rows, n_rows + 1):
-        y = row * dy
-        # Offset every other row
-        x_offset = 0.5 * dx if (row % 2 != 0) else 0.0
-        n_cols = int(math.ceil(R_m / dx)) + 1
-        for col in range(-n_cols, n_cols + 1):
-            x = col * dx + x_offset
-            if x ** 2 + y ** 2 <= R_m ** 2:
-                positions.append((x, y))
-    positions = np.array(positions)
-    return positions[:, 0], positions[:, 1]
-
-
-def compute_array_factor(theta_deg, phi_deg, x_pos, y_pos, weights,
-                         lambda_0):
-    """
-    Compute array factor AF(θ) for given element positions and weights.
-    θ is elevation from boresight, φ is azimuth cut (fixed).
-    """
-    theta_rad = np.radians(theta_deg)
-    phi_rad = np.radians(phi_deg)
-    kx = (2 * PI / lambda_0) * np.sin(theta_rad) * np.cos(phi_rad)
-    ky = (2 * PI / lambda_0) * np.sin(theta_rad) * np.sin(phi_rad)
-
-    AF = np.zeros_like(theta_rad, dtype=complex)
-    for i in range(len(x_pos)):
-        phase = kx * x_pos[i] + ky * y_pos[i]
-        AF += weights[i] * np.exp(1j * phase)
-    return AF
-
-
-def gaussian_taper_weights(x, y, R, taper_dB):
-    """
-    Apply a Gaussian (parabolic-on-pedestal approximation) taper.
-    Elements at the edge are taper_dB below the centre.
-    """
-    r = np.sqrt(x ** 2 + y ** 2)
-    r_norm = r / R  # 0 at centre, 1 at edge
-    # Pedestal voltage
-    T_lin = 10 ** (-abs(taper_dB) / 20.0)
-    # Parabolic on pedestal: E(r) = T + (1-T)(1 - r²)  for n=1
-    weights = T_lin + (1.0 - T_lin) * (1.0 - r_norm ** 2)
-    return weights
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Full design procedure
-# ──────────────────────────────────────────────────────────────────────────────
-
-def run_design(f_center, f_offset, theta_sm, G_min, taper_dB, eta_e_pct,
-               element_name, L_s, GL_pe, X, I_m):
-    """
-    Execute the full phased-array design and return a results dict.
-    """
-    res = {}
-
-    # Derived frequencies
-    f_max = f_center + f_offset   # GHz — worst-case for grating lobes
-    f_min = f_center - f_offset   # GHz — worst-case for directivity
-    lambda_h = wavelength_m(f_max)          # shortest λ (grating-lobe calc)
-    lambda_l = wavelength_m(f_min)          # longest  λ (directivity calc)
-    lambda_c = wavelength_m(f_center)       # centre   λ (nominal)
-
-    res["f_center"] = f_center
-    res["f_min"] = f_min
-    res["f_max"] = f_max
-    res["lambda_h_mm"] = lambda_h * 1000
-    res["lambda_l_mm"] = lambda_l * 1000
-    res["lambda_c_mm"] = lambda_c * 1000
-
-    # Element beamwidth constant
-    A_const = ELEMENT_BW_CONSTANTS.get(element_name, 70)
-
-    # Taper efficiency
-    eta_taper = taper_efficiency(taper_dB)
-    res["eta_taper"] = eta_taper
-    # Taper loss in dB
-    TL_dB = -10.0 * math.log10(eta_taper)
-    res["TL_dB"] = round(TL_dB, 3)
-
-    # Element efficiency (fractional)
-    eta_e = eta_e_pct / 100.0
-
-    # Grating-lobe placement
-    theta_G = grating_lobe_angle(theta_sm)
-    res["theta_G"] = theta_G
-
-    # Element spacing (hexagonal lattice)
-    d_hex_m, d_hex_norm = hex_element_spacing(lambda_h, theta_sm, theta_G)
-    res["d_hex_m"] = d_hex_m
-    res["d_hex_mm"] = d_hex_m * 1000
-    res["d_hex_norm"] = d_hex_norm  # d / λ_h
-
-    # Element directivity (use λ_l for directivity)
-    De_dBi, De_lin, A_e = element_directivity_dBi(eta_e, d_hex_m, lambda_l)
-    res["De_dBi"] = De_dBi
-    res["De_lin"] = De_lin
-    res["A_e_mm2"] = A_e * 1e6
-
-    # Scan loss
-    SL = scan_loss_dB(theta_sm, d_hex_norm, A_const)
-    res["SL_dB"] = SL
-
-    # Required peak directivity  — Eq. (5)
-    Dp = peak_directivity_dBi(G_min, SL, TL_dB, L_s, GL_pe, X, I_m)
-    res["Dp_dBi"] = Dp
-
-    # Number of elements
-    N_raw = num_elements(Dp, De_dBi)
-    N_int = math.ceil(N_raw)
-    res["N_raw"] = N_raw
-    res["N"] = N_int
-
-    # Recalculated directivity with integer N
-    Dp_actual = array_directivity_dBi(N_int, eta_taper, De_lin)
-    res["Dp_actual_dBi"] = Dp_actual
-    Dp_at_scan = Dp_actual - SL
-    res["Dp_at_scan_dBi"] = Dp_at_scan
-
-    # Gain at scan edge (subtract losses)
-    G_at_scan = Dp_at_scan - L_s - GL_pe - I_m
-    res["G_at_scan_dBi"] = G_at_scan
-
-    # Array physical size
-    total_area = N_int * A_e
-    R_circ = math.sqrt(total_area / PI)
-    diameter_circ = 2 * R_circ
-    res["total_area_m2"] = total_area
-    res["R_circ_m"] = R_circ
-    res["diameter_circ_m"] = diameter_circ
-    res["diameter_circ_lambda"] = diameter_circ / lambda_c
-
-    # Generate element positions
-    x_pos, y_pos = generate_hex_grid_circular(d_hex_m, R_circ)
-    N_actual = len(x_pos)
-    res["N_placed"] = N_actual
-
-    # If placed elements differ significantly, re-adjust
-    if N_actual > 0:
-        Dp_placed = array_directivity_dBi(N_actual, eta_taper, De_lin)
-    else:
-        Dp_placed = 0
-    res["Dp_placed_dBi"] = Dp_placed
-
-    # Taper weights
-    weights = gaussian_taper_weights(x_pos, y_pos, R_circ, taper_dB)
-
-    # Grating-lobe locations
-    # Boresight GL
-    if 1.1547 / d_hex_norm < 1.0:
-        boresight_GL = 90.0
-    else:
-        val = 1.1547 / d_hex_norm
-        if val <= 1.0:
-            boresight_GL = np.degrees(np.arcsin(val))
-        else:
-            boresight_GL = 90.0
-    # Scanned GL
-    val2 = 1.1547 / d_hex_norm - np.sin(np.radians(theta_sm))
-    if abs(val2) <= 1.0:
-        scan_GL = np.degrees(np.arcsin(val2))
-    else:
-        scan_GL = 90.0
-    res["boresight_GL_deg"] = boresight_GL
-    res["scan_GL_deg"] = scan_GL
-
-    # Half-power beamwidth of element
-    theta_3_element = A_const / d_hex_norm  # degrees
-    res["theta_3_element"] = theta_3_element
-
-    # Pack arrays for plotting
-    res["x_pos"] = x_pos
-    res["y_pos"] = y_pos
-    res["weights"] = weights
-    res["lambda_c"] = lambda_c
-    res["R_circ"] = R_circ
-    res["eta_e"] = eta_e
-    res["taper_dB"] = taper_dB
-
-    return res
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Plotting helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def plot_array_layout(x, y, weights, R, d_m, title="Array Layout"):
-    """Scatter plot of element positions coloured by taper weight."""
-    fig, ax = plt.subplots(figsize=(7, 7), dpi=110)
-    fig.patch.set_facecolor("#ffffff")
-    ax.set_facecolor("#ffffff")
-
-    # Aperture circle
-    circle = plt.Circle((0, 0), R * 1000, fill=False, edgecolor="#4fc3f7",
-                         linewidth=1.5, linestyle="--", label="Aperture boundary")
-    ax.add_patch(circle)
-
-    sc = ax.scatter(x * 1000, y * 1000, c=weights, cmap="inferno",
-                    s=18, edgecolors="none", zorder=3)
-    cbar = fig.colorbar(sc, ax=ax, shrink=0.75, pad=0.04)
-    cbar.set_label("Taper Weight (linear)", color="#111111", fontsize=10)
-    cbar.ax.yaxis.set_tick_params(color="#111111")
-    plt.setp(cbar.ax.yaxis.get_ticklabels(), color="#111111")
-
-    ax.set_xlabel("x  (mm)", color="#111111", fontsize=11)
-    ax.set_ylabel("y  (mm)", color="#111111", fontsize=11)
-    ax.set_title(title, color="#111111", fontsize=13, fontweight="bold")
-    ax.set_aspect("equal")
-    ax.tick_params(colors="#111111")
-    for spine in ax.spines.values():
-        spine.set_color("#333")
-    ax.legend(loc="upper right", fontsize=9, facecolor="#ffffff",
-              edgecolor="#bbbbbb", labelcolor="#111111")
-    ax.grid(True, alpha=0.15, color="#bbbbbb")
-    fig.tight_layout()
-    return fig
-
-
-def plot_radiation_pattern(x_pos, y_pos, weights, lambda_0, Dp_dBi,
-                           title="Array Radiation Pattern"):
-    """Compute and plot the normalized array factor in a principal plane."""
-    theta_range = np.linspace(-30, 30, 3001)
-    AF = compute_array_factor(theta_range, 0.0, x_pos, y_pos, weights, lambda_0)
-    AF_mag = np.abs(AF)
-    AF_mag_max = AF_mag.max()
-    if AF_mag_max > 0:
-        AF_norm_dB = 20 * np.log10(AF_mag / AF_mag_max)
-    else:
-        AF_norm_dB = np.zeros_like(AF_mag)
-
-    # Scale to absolute directivity
-    AF_abs_dB = AF_norm_dB + Dp_dBi
-
-    fig, ax = plt.subplots(figsize=(9, 5), dpi=110)
-    fig.patch.set_facecolor("#ffffff")
-    ax.set_facecolor("#ffffff")
-
-    ax.plot(theta_range, AF_abs_dB, color="#00e5ff", linewidth=1.2,
-            label="φ = 0° cut")
-    ax.axhline(y=Dp_dBi, color="#ff9800", linestyle=":", linewidth=0.8,
-               label=f"Peak = {Dp_dBi:.1f} dBi")
-    ax.axhline(y=Dp_dBi - 3, color="#66bb6a", linestyle="--", linewidth=0.8,
-               label="−3 dB")
-    ax.set_ylim(Dp_dBi - 50, Dp_dBi + 3)
-    ax.set_xlim(-30, 30)
-    ax.set_xlabel("θ  (degrees)", color="#111111", fontsize=11)
-    ax.set_ylabel("Directivity  (dBi)", color="#111111", fontsize=11)
-    ax.set_title(title, color="#111111", fontsize=13, fontweight="bold")
-    ax.tick_params(colors="#111111")
-    for spine in ax.spines.values():
-        spine.set_color("#333")
-    ax.legend(fontsize=9, facecolor="#ffffff", edgecolor="#bbbbbb",
-              labelcolor="#111111")
-    ax.grid(True, alpha=0.15, color="#bbbbbb")
-    fig.tight_layout()
-    return fig
-
-
-def plot_normalized_pattern(x_pos, y_pos, weights, lambda_0, Dp_dBi,
-                            title="Normalized Radiation Pattern"):
-    """Plot the normalized (0 dB peak) pattern."""
-    theta_range = np.linspace(-30, 30, 3001)
-    AF = compute_array_factor(theta_range, 0.0, x_pos, y_pos, weights, lambda_0)
-    AF_mag = np.abs(AF)
-    AF_mag_max = AF_mag.max()
-    if AF_mag_max > 0:
-        AF_norm_dB = 20 * np.log10(AF_mag / AF_mag_max)
-    else:
-        AF_norm_dB = np.zeros_like(AF_mag)
-
-    fig, ax = plt.subplots(figsize=(9, 5), dpi=110)
-    fig.patch.set_facecolor("#ffffff")
-    ax.set_facecolor("#ffffff")
-
-    ax.plot(theta_range, AF_norm_dB, color="#ce93d8", linewidth=1.2)
-    ax.axhline(y=-3, color="#66bb6a", linestyle="--", linewidth=0.8, label="−3 dB")
-    ax.set_ylim(-50, 3)
-    ax.set_xlim(-30, 30)
-    ax.set_xlabel("θ  (degrees)", color="#111111", fontsize=11)
-    ax.set_ylabel("Normalized Gain  (dB)", color="#111111", fontsize=11)
-    ax.set_title(title, color="#111111", fontsize=13, fontweight="bold")
-    ax.tick_params(colors="#111111")
-    for spine in ax.spines.values():
-        spine.set_color("#333")
-    ax.legend(fontsize=9, facecolor="#ffffff", edgecolor="#bbbbbb",
-              labelcolor="#111111")
-    ax.grid(True, alpha=0.15, color="#bbbbbb")
-    fig.tight_layout()
-    return fig
-
-
-def plot_efficiency_vs_taper():
-    """Plot array efficiency vs illumination taper."""
-    taper_range = np.linspace(0, 20, 200)
-    eff = np.array([taper_efficiency(t) * 100 for t in taper_range])
-
-    fig, ax = plt.subplots(figsize=(7, 4), dpi=110)
-    fig.patch.set_facecolor("#ffffff")
-    ax.set_facecolor("#ffffff")
-
-    ax.plot(taper_range, eff, color="#ffd54f", linewidth=1.5)
-    ax.axvline(x=10, color="#ef5350", linestyle="--", linewidth=0.8,
-               label="10 dB taper")
-    ax.set_xlabel("Edge Illumination Taper  (dB)", color="#111111", fontsize=11)
-    ax.set_ylabel("Array Efficiency  (%)", color="#111111", fontsize=11)
-    ax.set_title("Array Efficiency vs Illumination Taper", color="#111111",
-                 fontsize=13, fontweight="bold")
-    ax.tick_params(colors="#111111")
-    for spine in ax.spines.values():
-        spine.set_color("#333")
-    ax.legend(fontsize=9, facecolor="#ffffff", edgecolor="#bbbbbb",
-              labelcolor="#111111")
-    ax.grid(True, alpha=0.15, color="#bbbbbb")
-    fig.tight_layout()
-    return fig
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# STREAMLIT APPLICATION
-# ──────────────────────────────────────────────────────────────────────────────
-
+# ───────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="CICAD 2025 — PA Antenna Design",
+    page_title="Phased Array Antenna Designer",
     page_icon="📡",
     layout="wide",
 )
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────
+# CUSTOM CSS for polished, light look
+# ───────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    /* light metric cards with dark text */
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=DM+Sans:wght@400;500;700&display=swap');
+
+    /* Main container */
+    .block-container {
+        max-width: 1200px;
+        padding-top: 1.5rem;
+    }
+
+    /* Metric cards */
     div[data-testid="stMetric"] {
-        background: linear-gradient(135deg, #ffffff 0%, #f5f5f5 100%);
-        border: 1px solid #dddddd;
+        background: linear-gradient(135deg, #f9fbff 0%, #e3edf9 100%);
+        border: 1px solid #d0d8e8;
+        border-radius: 12px;
+        padding: 16px 20px;
+        box-shadow: 0 4px 16px rgba(15, 25, 35, 0.08);
+    }
+    div[data-testid="stMetric"] label {
+        color: #48658c !important;
+        font-family: 'DM Sans', sans-serif !important;
+        font-size: 0.82rem !important;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: #132033 !important;
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 1.6rem !important;
+        font-weight: 700;
+    }
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #f5f7fb 0%, #e6edf7 100%);
+    }
+    section[data-testid="stSidebar"] .stMarkdown h1,
+    section[data-testid="stSidebar"] .stMarkdown h2,
+    section[data-testid="stSidebar"] .stMarkdown h3 {
+        color: #27436b;
+        font-family: 'DM Sans', sans-serif;
+    }
+
+    /* Headers */
+    h1, h2, h3, h4 {
+        font-family: 'DM Sans', sans-serif !important;
+        color: #132033;
+    }
+
+    /* Expander / section headers */
+    .stExpander {
+        border: 1px solid #d0d8e8;
         border-radius: 10px;
-        padding: 12px 16px;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
     }
-    div[data-testid="stMetric"] * {
-        color: #111111 !important;
-    }
-    .block-container { padding-top: 1.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────
+# SIDEBAR — Input Parameters
+# ───────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/satellite-signal.png", width=64)
-    st.title("🛰️ Input Parameters")
+    st.markdown("## 📡 Input Parameters")
     st.markdown("---")
 
-    f_center = st.number_input("Centre Frequency (GHz)", min_value=1.0,
-                               value=44.5, step=0.5, format="%.2f")
-    f_offset = st.number_input("Frequency Offset ± (GHz)", min_value=0.0,
-                               value=1.0, step=0.1, format="%.2f",
-                               help="Bandwidth = ±offset → max freq used for grating-lobe calc")
+    f_center_ghz = st.number_input(
+        "Center Frequency (GHz)", min_value=1.0, max_value=100.0,
+        value=14.5, step=0.5, format="%.1f",
+        help="Center frequency of the operating band."
+    )
+    bw_ghz = st.number_input(
+        "Bandwidth ± (GHz)", min_value=0.0, max_value=20.0,
+        value=1.0, step=0.1, format="%.1f",
+        help="Half-bandwidth. Band = center ± this value."
+    )
+    eta_element = st.slider(
+        "Element Efficiency (%)", 10, 100, 90, 1,
+        help="Aperture efficiency of the individual patch element."
+    )
+    theta_max_deg = st.number_input(
+        "Max Scan Angle (°)", min_value=0.0, max_value=89.0,
+        value=45.0, step=1.0, format="%.1f",
+        help="Maximum scan angle from boresight."
+    )
+    theta_g_deg = st.number_input(
+        "Grating Lobe Margin Angle (°)", min_value=0.0, max_value=90.0,
+        value=47.0, step=1.0, format="%.1f",
+        help="Angle slightly beyond scan edge to avoid grating lobes."
+    )
+    G_min_dBi = st.number_input(
+        "Min Gain over Scan Range (dBi)", min_value=0.0, max_value=60.0,
+        value=20.0, step=0.5, format="%.1f",
+        help="Minimum gain required at the edge of scan."
+    )
+    T_illumination_dB = st.number_input(
+        "Edge Illumination Taper (dB)", min_value=0.0, max_value=20.0,
+        value=0.0, step=0.5, format="%.1f",
+        help="0 dB = uniform illumination."
+    )
+    antenna_loss_dB = st.number_input(
+        "Front-end / Antenna Loss (dB)", min_value=0.0, max_value=10.0,
+        value=0.5, step=0.1, format="%.1f",
+        help="Includes mismatch, polarization, insertion losses."
+    )
+    pointing_error_loss_dB = st.number_input(
+        "Pointing Error Loss (dB)", min_value=0.0, max_value=5.0,
+        value=0.0, step=0.1, format="%.1f"
+    )
+    loss_beam_diameter_dB = st.number_input(
+        "Loss over Beam Diameter (dB)", min_value=0.0, max_value=5.0,
+        value=3.0, step=0.5, format="%.1f",
+        help="Typically 3 dB if full beam, 0 dB if beam-peak only."
+    )
+    implementation_margin_dB = st.number_input(
+        "Implementation Margin (dB)", min_value=0.0, max_value=5.0,
+        value=0.5, step=0.1, format="%.1f",
+        help="Margin for thermal, failures, amp/phase errors (typ. 0.5–1 dB)."
+    )
 
     st.markdown("---")
-    theta_sm = st.number_input("Max Scan Angle (degrees)", min_value=0.0,
-                               max_value=90.0, value=9.0, step=1.0)
-    G_min = st.number_input("Min Gain over Coverage (dBi)", min_value=0.0,
-                            value=40.0, step=1.0)
-    taper_dB = st.number_input("Edge Illumination Taper (dB)", min_value=0.0,
-                               value=10.0, step=1.0)
-    eta_e_pct = st.number_input("Element Aperture Efficiency (%)",
-                                min_value=1.0, max_value=100.0, value=70.0,
-                                step=5.0)
-    element_name = st.selectbox("Radiating Element Type",
-                                list(ELEMENT_BW_CONSTANTS.keys()), index=1)
+    st.markdown("##### 🔬 Problem Defaults")
+    st.caption("Freq 14.5 ± 1 GHz · Square grid · Patch 90% · θ_max 45° · G_min 20 dBi · Uniform illum.")
 
-    st.markdown("---")
-    st.markdown("**Additional Losses (dB)**")
-    L_s = st.number_input("Antenna / Front-end Loss", min_value=0.0,
-                          value=0.0, step=0.1)
-    GL_pe = st.number_input("Pointing Error Loss", min_value=0.0,
-                            value=0.0, step=0.1)
-    X = st.number_input("Loss over Beam Diameter", min_value=0.0,
-                        value=0.0, step=0.1,
-                        help="Typically 3 dB if full beam, 0 dB for peak only")
-    I_m = st.number_input("Implementation Margin", min_value=0.0,
-                          value=0.5, step=0.1)
+# ───────────────────────────────────────────────────────────────
+# CORE CALCULATIONS
+# ───────────────────────────────────────────────────────────────
+f_center = f_center_ghz * 1e9          # Hz
+f_low = (f_center_ghz - bw_ghz) * 1e9
+f_high = (f_center_ghz + bw_ghz) * 1e9
 
-# ── Header ────────────────────────────────────────────────────────────────────
-st.markdown("# 📡  CICAD 2025 — Phased Array Antenna Design Tool")
-st.markdown(
-    f"**Problem 2 :** Hexagonal-grid PA at **{f_center} GHz ± {f_offset} GHz**, "
-    f"**{element_name}** elements, circular aperture, "
-    f"**{taper_dB:.0f} dB** taper, **±{theta_sm:.0f}°** scan, "
-    f"**{G_min:.0f} dBi** min gain."
-)
+lambda_nom = c / f_center              # wavelength at center freq
+lambda_low = c / f_low                 # longest wavelength (lowest freq)
+lambda_high = c / f_high               # shortest wavelength (highest freq) — for grating lobes
+
+theta_max_rad = math.radians(theta_max_deg)
+theta_g_rad = math.radians(theta_g_deg)
+eta = eta_element / 100.0              # element efficiency as fraction
+
+# ── Illumination taper efficiency (parabolic on pedestal, n=1) ──
+T_lin = 10 ** (-T_illumination_dB / 20.0)  # pedestal voltage
+if T_illumination_dB == 0.0:
+    eta_taper = 1.0       # uniform
+    taper_loss_dB = 0.0
+else:
+    eta_taper = 75.0 * ((1 + T_lin) ** 2) / (1 + T_lin + T_lin ** 2) / 100.0
+    taper_loss_dB = -10.0 * math.log10(eta_taper)
+
+# ── Part A: Required Peak Directivity ───────────────────────
+# Scan loss for small elements (d ~ 0.5λ): SL = 10 log10(cos^n θ), n≈1.5
+n_scan = 1.5
+scan_loss_dB = -10.0 * math.log10(math.cos(theta_max_rad) ** n_scan)
+
+# Peak directivity (Eq 5 from Rao & Ostroot)
+# D_p = G_min + L_s + SL + GL_pe + T_L + X + I_m
+D_peak_dBi = (G_min_dBi + antenna_loss_dB + scan_loss_dB +
+              pointing_error_loss_dB + taper_loss_dB +
+              loss_beam_diameter_dB + implementation_margin_dB)
+
+D_peak_linear = 10.0 ** (D_peak_dBi / 10.0)
+
+# ── Part B: Element Spacing & Element Gain ──────────────────
+# Square lattice grating-lobe-free condition (Eq 1 with θ_G):
+#   d / λ_h  ≤  1 / (sin θ_sm + sin θ_G)
+d_over_lambda = 1.0 / (math.sin(theta_max_rad) + math.sin(theta_g_rad))
+d_spacing = d_over_lambda * lambda_high          # physical spacing (m)
+d_spacing_mm = d_spacing * 1000.0
+
+# Element directivity (Eq 3 — unit cell area, lowest freq for directivity)
+A_cell = d_spacing ** 2                            # square lattice unit cell
+D_el_linear = eta * 4.0 * math.pi * A_cell / (lambda_low ** 2)
+D_el_dBi = 10.0 * math.log10(D_el_linear)
+
+G_el_dBi = D_el_dBi   # gain ≈ directivity × efficiency already included
+
+# ── Part C: Number of Elements & Array Size ─────────────────
+# N = 10^(0.1*D_p - 0.1*D_e)  (Eq 4)
+N_required = 10.0 ** (0.1 * D_peak_dBi - 0.1 * D_el_dBi)
+N_side = math.ceil(math.sqrt(N_required))
+N_total = N_side * N_side
+
+L_aperture = N_side * d_spacing                    # total aperture side (m)
+L_aperture_mm = L_aperture * 1000.0
+
+# Actual achieved peak directivity with N_total elements
+D_actual_linear = N_total * D_el_linear * eta_taper
+D_actual_dBi = 10.0 * math.log10(D_actual_linear)
+
+# Achieved directivity at scan edge
+D_scan_dBi = D_actual_dBi - scan_loss_dB
+
+# Achieved gain at scan edge
+G_scan_dBi = D_scan_dBi - antenna_loss_dB - pointing_error_loss_dB - implementation_margin_dB - loss_beam_diameter_dB
+
+# Grating lobe locations
+gl_ratio = lambda_high / d_spacing
+if gl_ratio <= 1.0:
+    gl_boresight_deg = math.degrees(math.asin(gl_ratio))
+else:
+    gl_boresight_deg = 90.0
+
+gl_scan_arg = lambda_high / d_spacing - math.sin(theta_max_rad)
+if -1.0 <= gl_scan_arg <= 1.0:
+    gl_scan_deg = math.degrees(math.asin(gl_scan_arg))
+else:
+    gl_scan_deg = 90.0
+
+# ── Half-power beamwidth (approximate for square aperture) ──
+# θ_3 ≈ 0.886 λ / L  (radians) for uniform illumination
+hpbw_rad = 0.886 * lambda_nom / L_aperture
+hpbw_deg = math.degrees(hpbw_rad)
+
+# First Sidelobe Level (Uniform square aperture)
+first_sidelobe_dB = -13.26
+
+# ───────────────────────────────────────────────────────────────
+# TITLE
+# ───────────────────────────────────────────────────────────────
+st.markdown("# 📡 Phased Array Antenna Design Tool")
+st.markdown("**CICAD 2025 — Assignment Problem 1** · Square Grid · Microstrip Patch · 14.5 GHz ± 1 GHz")
 st.markdown("---")
 
-# ── Run design ────────────────────────────────────────────────────────────────
-res = run_design(f_center, f_offset, theta_sm, G_min, taper_dB, eta_e_pct,
-                 element_name, L_s, GL_pe, X, I_m)
+# ───────────────────────────────────────────────────────────────
+# PART A — Peak Directivity
+# ───────────────────────────────────────────────────────────────
+st.markdown("### Part (a): Required Peak Directivity")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SECTION A — Peak Directivity
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-st.subheader("Part A — Required Peak Directivity")
-
-st.markdown(
-    "Using **Eq. (5)**:\n\n"
-    r"$$D_p = G_{\min} + L_s + SL + GL_{pe} + T_L + X + I_m$$"
-)
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("λ_min (mm)", f"{res['lambda_h_mm']:.3f}")
-c2.metric("λ_max (mm)", f"{res['lambda_l_mm']:.3f}")
-c3.metric("λ_center (mm)", f"{res['lambda_c_mm']:.3f}")
-c4.metric("Grating Lobe θ_G", f"{res['theta_G']:.1f}°")
-
-st.markdown("---")
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Taper Efficiency η_taper", f"{res['eta_taper']*100:.2f} %")
-c2.metric("Taper Loss T_L", f"{res['TL_dB']:.2f} dB")
-c3.metric("Scan Loss SL", f"{res['SL_dB']:.2f} dB")
-
-st.markdown("---")
-
-st.markdown("### ✅  Required Peak Directivity")
-c1, c2 = st.columns(2)
-c1.metric("D_p (required)", f"{res['Dp_dBi']:.2f} dBi")
-c2.metric("Breakdown",
-          f"{G_min:.1f} + {L_s:.1f} + {res['SL_dB']:.2f} + "
-          f"{GL_pe:.1f} + {res['TL_dB']:.2f} + {X:.1f} + {I_m:.1f} dB")
+col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+col_a1.metric("Min Gain Required", f"{G_min_dBi:.1f} dBi")
+col_a2.metric("Scan Loss @ {:.0f}°".format(theta_max_deg), f"{scan_loss_dB:.2f} dB")
+col_a3.metric("Taper Loss", f"{taper_loss_dB:.2f} dB")
+col_a4.metric("**Peak Directivity Dₚ**", f"{D_peak_dBi:.2f} dBi")
 
 st.info(
-    f"To achieve **{G_min:.0f} dBi** minimum gain at the ±{theta_sm:.0f}° scan edge "
-    f"with a {taper_dB:.0f} dB taper and {eta_e_pct:.0f}% element efficiency, "
-    f"the array peak boresight directivity must be at least **{res['Dp_dBi']:.2f} dBi**."
+    f"**Calculation:** Dₚ = G_min + Lₛ + SL + GL_pe + T_L + X + Iₘ  \n"
+    f"= {G_min_dBi} + {antenna_loss_dB} + {scan_loss_dB:.2f} + {pointing_error_loss_dB} "
+    f"+ {taper_loss_dB:.2f} + {loss_beam_diameter_dB} + {implementation_margin_dB}  \n"
+    f"= **{D_peak_dBi:.2f} dBi** \n\n"
+    f"Scan loss uses SL = 10·log₁₀(cos^{n_scan:.1f}(θ)) with θ_max = {theta_max_deg}°."
 )
 
 st.markdown("---")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SECTION B — Spacing & Elements
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-st.subheader("Part B — Element Spacing, Element Gain & Number of Elements")
+# ───────────────────────────────────────────────────────────────
+# PART B — Element Spacing & Element Gain
+# ───────────────────────────────────────────────────────────────
+st.markdown("### Part (b): Element Spacing & Element Gain")
 
-st.markdown(
-    "**Hexagonal lattice spacing** — Eq. (2):\n\n"
-    r"$$\frac{d_h}{\lambda_h} \leq \frac{1.1547}{\sin\theta_{sm} + \sin\theta_G}$$"
-)
+col_b1, col_b2, col_b3, col_b4 = st.columns(4)
+col_b1.metric("d / λ_high", f"{d_over_lambda:.4f}")
+col_b2.metric("Element Spacing d", f"{d_spacing_mm:.2f} mm")
+col_b3.metric("Element Directivity Dₑ", f"{D_el_dBi:.2f} dBi")
+col_b4.metric("λ_high (mm)", f"{lambda_high*1000:.2f}")
 
-c1, c2, c3 = st.columns(3)
-c1.metric("d / λ_h", f"{res['d_hex_norm']:.4f}")
-c2.metric("d (mm)", f"{res['d_hex_mm']:.3f}")
-c3.metric("Unit-cell area (mm²)", f"{res['A_e_mm2']:.3f}")
-
-st.markdown("---")
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Element Directivity D_e", f"{res['De_dBi']:.2f} dBi")
-c2.metric("Element Gain G_e", f"{res['De_dBi'] - 10*math.log10(1/res['eta_e']):.2f} dBi"
-          if res['eta_e'] > 0 else "—")
-c3.metric("Element 3-dB BW θ₃", f"{res['theta_3_element']:.2f}°")
-
-st.markdown("---")
-
-c1, c2, c3 = st.columns(3)
-c1.metric("N (calculated)", f"{res['N_raw']:.1f}")
-c2.metric("N (rounded up)", f"{res['N']}")
-c3.metric("N (placed in grid)", f"{res['N_placed']}")
-
-st.markdown("---")
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Peak Directivity (placed)", f"{res['Dp_placed_dBi']:.2f} dBi")
-c2.metric("Directivity at scan edge", f"{res['Dp_placed_dBi'] - res['SL_dB']:.2f} dBi")
-c3.metric("Aperture diameter",
-          f"{res['diameter_circ_m']*1000:.1f} mm  ({res['diameter_circ_lambda']:.1f}λ)")
-
-st.markdown("---")
-
-c1, c2 = st.columns(2)
-c1.metric("Boresight Grating Lobe", f"{res['boresight_GL_deg']:.2f}°")
-c2.metric("Grating Lobe at scan edge", f"{res['scan_GL_deg']:.2f}°")
-
-st.success(
-    f"A hexagonal array of **{res['N_placed']} elements** with "
-    f"**d = {res['d_hex_mm']:.3f} mm** ({res['d_hex_norm']:.3f}λ) spacing "
-    f"fits inside a circular aperture of **{res['diameter_circ_m']*1000:.1f} mm** diameter."
+st.info(
+    f"**Grating-lobe-free condition (square lattice):** \n"
+    f"d / λ_h ≤ 1 / (sin θ_sm + sin θ_G) = 1 / (sin {theta_max_deg}° + sin {theta_g_deg}°) = **{d_over_lambda:.4f}** \n"
+    f"d = {d_over_lambda:.4f} × {lambda_high*1000:.2f} mm = **{d_spacing_mm:.2f} mm** \n\n"
+    f"**Element directivity:** Dₑ = 10·log₁₀(η_e · 4π · (d/λ_low)²) = "
+    f"10·log₁₀({eta:.2f} × 4π × ({d_spacing_mm/1000:.4f}/{lambda_low:.4f})²) → **{D_el_dBi:.2f} dBi**"
 )
 
 st.markdown("---")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SECTION C — Layout & Patterns
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-st.subheader("Part C — Array Layout & Radiation Patterns")
+# ───────────────────────────────────────────────────────────────
+# PART C — Number of Elements, Layout, Patterns
+# ───────────────────────────────────────────────────────────────
+st.markdown("### Part (c): Array Configuration & Radiation Patterns")
 
-col1, col2 = st.columns(2)
-with col1:
-    fig_layout = plot_array_layout(
-        res["x_pos"], res["y_pos"], res["weights"], res["R_circ"],
-        res["d_hex_m"],
-        title=f"Hexagonal Array Layout  ({res['N_placed']} elements)")
-    st.pyplot(fig_layout, use_container_width=True)
+col_c1, col_c2, col_c3, col_c4 = st.columns(4)
+col_c1.metric("Elements Required N", f"{N_required:.1f}")
+col_c2.metric("Per Side N_side", f"{N_side}")
+col_c3.metric("Total Elements", f"{N_total}")
+col_c4.metric("Aperture Size", f"{L_aperture_mm:.1f} × {L_aperture_mm:.1f} mm")
 
-with col2:
-    fig_eff = plot_efficiency_vs_taper()
-    st.pyplot(fig_eff, use_container_width=True)
+col_c5, col_c6, col_c7, col_c8 = st.columns(4)
+col_c5.metric("Achieved Dₚ (boresight)", f"{D_actual_dBi:.2f} dBi")
+col_c6.metric("Directivity @ scan edge", f"{D_scan_dBi:.2f} dBi")
+col_c7.metric("Gain @ scan edge", f"{G_scan_dBi:.2f} dBi")
+col_c8.metric("First Sidelobe Level", f"{first_sidelobe_dB} dB")
 
-st.markdown("---")
+st.info(
+    f"**N** = 10^(0.1·Dₚ − 0.1·Dₑ) = 10^(0.1×{D_peak_dBi:.2f} − 0.1×{D_el_dBi:.2f}) "
+    f"= **{N_required:.1f}** \n"
+    f"Square array: N_side = ⌈√{N_required:.1f}⌉ = **{N_side}** → N_total = {N_side}² = **{N_total}** \n"
+    f"Aperture = {N_side} × {d_spacing_mm:.2f} mm = **{L_aperture_mm:.1f} mm** per side  \n"
+    f"First Sidelobe Level for uniform square aperture is **{first_sidelobe_dB} dB**."
+)
 
-st.markdown("#### Radiation Pattern (φ = 0° cut)")
-fig_pat = plot_radiation_pattern(
-    res["x_pos"], res["y_pos"], res["weights"],
-    res["lambda_c"], res["Dp_placed_dBi"],
-    title=f"Array Factor — {res['N_placed']} elements, {taper_dB:.0f} dB taper")
-st.pyplot(fig_pat, use_container_width=True)
+# ───────────────────────────────────────────────────────────────
+# PLOTS
+# ───────────────────────────────────────────────────────────────
 
-st.markdown("#### Normalized Pattern")
-fig_norm = plot_normalized_pattern(
-    res["x_pos"], res["y_pos"], res["weights"],
-    res["lambda_c"], res["Dp_placed_dBi"],
-    title="Normalized Array Radiation Pattern")
-st.pyplot(fig_norm, use_container_width=True)
+# Color palette (light theme)
+C_BG = "#ffffff"
+C_GRID = "#dde3ee"
+C_LINE1 = "#0052cc"
+C_LINE2 = "#ff6b6b"
+C_LINE3 = "#2f9e44"
+C_TEXT = "#334155"
+C_ACCENT = "#f59e0b"
 
-st.markdown("---")
+def style_ax(ax, title="", xlabel="", ylabel=""):
+    """Apply consistent dark styling to an axis."""
+    ax.set_facecolor(C_BG)
+    ax.set_title(title, color="white", fontsize=11, fontweight="bold", pad=10)
+    ax.set_xlabel(xlabel, color=C_TEXT, fontsize=9)
+    ax.set_ylabel(ylabel, color=C_TEXT, fontsize=9)
+    ax.tick_params(colors=C_TEXT, labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_color(C_GRID)
+    ax.grid(True, color=C_GRID, alpha=0.5, linewidth=0.5)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SECTION D — Complexity Reduction
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-st.subheader("Part D — Complexity Reduction with Reduced Scan Angle")
+# ── Array Factor computation ────────────────────────────────
+@st.cache_data
+def compute_array_factor(N_side, d_m, wavelength, scan_deg, theta_range_deg):
+    theta_rad = np.radians(theta_range_deg)
+    scan_rad = np.radians(scan_deg)
+    k = 2.0 * np.pi / wavelength
 
-theta_reduced = st.slider("Reduced Scan Angle (degrees)", min_value=1.0,
-                          max_value=float(theta_sm), value=6.0, step=0.5)
+    psi = k * d_m * (np.sin(theta_rad) - np.sin(scan_rad))
 
-res_red = run_design(f_center, f_offset, theta_reduced, G_min, taper_dB,
-                     eta_e_pct, element_name, L_s, GL_pe, X, I_m)
+    half_psi = psi / 2.0
+    N = N_side
+    numerator = np.sin(N * half_psi)
+    denominator = N * np.sin(half_psi)
 
-st.markdown("---")
-st.markdown("### Side-by-side Comparison")
+    with np.errstate(divide='ignore', invalid='ignore'):
+        af = np.where(np.abs(denominator) < 1e-12, 1.0, numerator / denominator)
 
-compare_data = {
+    af_power = np.abs(af) ** 2
+    af_power_db = 10.0 * np.log10(np.maximum(af_power, 1e-15))
+
+    return af_power_db
+
+theta_range = np.linspace(-90, 90, 3601)
+
+af_boresight = compute_array_factor(N_side, d_spacing, lambda_nom, 0.0, theta_range)
+af_scanned = compute_array_factor(N_side, d_spacing, lambda_nom, theta_max_deg, theta_range)
+
+element_pattern_dB = 10.0 * np.log10(np.maximum(np.cos(np.radians(theta_range)) ** n_scan, 1e-15))
+
+total_boresight = af_boresight + element_pattern_dB
+total_scanned = af_scanned + element_pattern_dB
+
+total_boresight_dBi = total_boresight + D_actual_dBi
+total_scanned_dBi = total_scanned + D_actual_dBi
+
+y_floor = -40
+total_boresight_clipped = np.clip(total_boresight, y_floor, 0)
+total_scanned_clipped = np.clip(total_scanned, y_floor, 0)
+
+# ── FIGURE: 2×2 plots ──────────────────────────────────────
+fig = plt.figure(figsize=(14, 11), facecolor=C_BG)
+gs = GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.30)
+
+# ── Plot 1: Radiation pattern — Boresight ────────────────
+ax1 = fig.add_subplot(gs[0, 0])
+style_ax(ax1, "Normalized Pattern — Boresight Beam", "θ (degrees)", "Normalized Gain (dB)")
+ax1.plot(theta_range, total_boresight_clipped, color=C_LINE1, linewidth=1.0, label="Boresight")
+ax1.set_xlim(-90, 90)
+ax1.set_ylim(y_floor, 3)
+ax1.axhline(first_sidelobe_dB, color=C_ACCENT, linestyle='--', linewidth=0.7, alpha=0.7, label=f"1st SLL ({first_sidelobe_dB} dB)")
+ax1.legend(fontsize=8, facecolor=C_BG, edgecolor=C_GRID, labelcolor=C_TEXT)
+
+# ── Plot 2: Radiation pattern — Scanned beam ─────────────
+ax2 = fig.add_subplot(gs[0, 1])
+style_ax(ax2, f"Normalized Pattern — Beam Scanned to {theta_max_deg:.0f}°", "θ (degrees)", "Normalized Gain (dB)")
+ax2.plot(theta_range, total_scanned_clipped, color=C_LINE2, linewidth=1.0, label=f"Scanned {theta_max_deg:.0f}°")
+ax2.set_xlim(-90, 90)
+ax2.set_ylim(y_floor, 3)
+ax2.axhline(-3, color=C_ACCENT, linestyle='--', linewidth=0.7, alpha=0.7, label="-3 dB")
+ax2.axvline(theta_max_deg, color=C_LINE3, linestyle=':', linewidth=0.7, alpha=0.7, label=f"θ = {theta_max_deg:.0f}°")
+ax2.legend(fontsize=8, facecolor=C_BG, edgecolor=C_GRID, labelcolor=C_TEXT)
+
+# ── Plot 3: Directivity patterns (dBi) ──────────────────
+ax3 = fig.add_subplot(gs[1, 0])
+style_ax(ax3, "Directivity Patterns (dBi)", "θ (degrees)", "Directivity (dBi)")
+mask_boresight = total_boresight_dBi > (D_actual_dBi + y_floor)
+mask_scanned = total_scanned_dBi > (D_actual_dBi + y_floor)
+ax3.plot(theta_range[mask_boresight], total_boresight_dBi[mask_boresight],
+         color=C_LINE1, linewidth=1.0, label="Boresight", alpha=0.9)
+ax3.plot(theta_range[mask_scanned], total_scanned_dBi[mask_scanned],
+         color=C_LINE2, linewidth=1.0, label=f"Scanned {theta_max_deg:.0f}°", alpha=0.9)
+ax3.axhline(G_min_dBi, color=C_ACCENT, linestyle='--', linewidth=0.8, alpha=0.8, label=f"G_min = {G_min_dBi} dBi")
+ax3.set_xlim(-90, 90)
+ax3.set_ylim(D_actual_dBi - 45, D_actual_dBi + 3)
+ax3.legend(fontsize=8, facecolor=C_BG, edgecolor=C_GRID, labelcolor=C_TEXT)
+
+# ── Plot 4: Array Element Layout ─────────────────────────
+ax4 = fig.add_subplot(gs[1, 1])
+ax4.set_facecolor(C_BG)
+ax4.set_title("Square Array Layout", color="white", fontsize=11, fontweight="bold", pad=10)
+ax4.set_xlabel("x (mm)", color=C_TEXT, fontsize=9)
+ax4.set_ylabel("y (mm)", color=C_TEXT, fontsize=9)
+ax4.tick_params(colors=C_TEXT, labelsize=8)
+for spine in ax4.spines.values():
+    spine.set_color(C_GRID)
+ax4.set_aspect('equal')
+
+positions_1d = np.arange(N_side) * d_spacing_mm
+positions_1d -= positions_1d.mean()  # center
+xx, yy = np.meshgrid(positions_1d, positions_1d)
+
+radius_mm = d_spacing_mm * 0.38
+for xi, yi in zip(xx.ravel(), yy.ravel()):
+    circle = plt.Circle((xi, yi), radius_mm, fill=True,
+                         facecolor="#1a5276", edgecolor=C_LINE1,
+                         linewidth=0.4, alpha=0.75)
+    ax4.add_patch(circle)
+
+ax4.scatter(xx, yy, s=2, color=C_LINE1, zorder=5)
+
+margin = d_spacing_mm * 1.2
+ax4.set_xlim(positions_1d[0] - margin, positions_1d[-1] + margin)
+ax4.set_ylim(positions_1d[0] - margin, positions_1d[-1] + margin)
+ax4.grid(True, color=C_GRID, alpha=0.3, linewidth=0.3)
+
+ax4.text(0.02, 0.98, f"N = {N_total} ({N_side}×{N_side})\n"
+         f"d = {d_spacing_mm:.2f} mm\n"
+         f"L = {L_aperture_mm:.1f} mm",
+         transform=ax4.transAxes, fontsize=8, color=C_ACCENT,
+         verticalalignment='top', fontfamily='monospace',
+         bbox=dict(boxstyle='round,pad=0.4', facecolor=C_BG, edgecolor=C_GRID, alpha=0.9))
+
+st.pyplot(fig)
+
+# ───────────────────────────────────────────────────────────────
+# POLAR PLOT
+# ───────────────────────────────────────────────────────────────
+st.markdown("### Polar Radiation Patterns")
+
+fig_polar, (ax_p1, ax_p2) = plt.subplots(1, 2, subplot_kw={'projection': 'polar'},
+                                          figsize=(12, 5), facecolor=C_BG)
+
+for ax_p, data, title, color in [
+    (ax_p1, total_boresight_clipped, "Boresight", C_LINE1),
+    (ax_p2, total_scanned_clipped, f"Scanned {theta_max_deg:.0f}°", C_LINE2),
+]:
+    ax_p.set_facecolor(C_BG)
+    theta_plot = np.radians(theta_range)
+    r = data - y_floor
+    ax_p.plot(theta_plot, r, color=color, linewidth=0.8)
+    ax_p.fill_between(theta_plot, 0, r, alpha=0.15, color=color)
+    ax_p.set_thetamin(-90)
+    ax_p.set_thetamax(90)
+    ax_p.set_theta_zero_location('N')
+    ax_p.set_title(title, color="white", fontsize=10, fontweight="bold", pad=15)
+    ax_p.tick_params(colors=C_TEXT, labelsize=7)
+    ax_p.set_rlabel_position(60)
+    ax_p.grid(True, color=C_GRID, alpha=0.4)
+    r_ticks = np.array([0, 10, 20, 30, 40])
+    ax_p.set_rticks(r_ticks)
+    ax_p.set_yticklabels([f"{int(v + y_floor)}" for v in r_ticks], fontsize=7, color=C_TEXT)
+
+fig_polar.tight_layout()
+st.pyplot(fig_polar)
+
+# ───────────────────────────────────────────────────────────────
+# SUMMARY TABLE
+# ───────────────────────────────────────────────────────────────
+st.markdown("### 📋 Design Summary")
+
+summary_data = {
     "Parameter": [
-        "Max Scan Angle (°)",
-        "Grating Lobe θ_G (°)",
-        "Element Spacing d/λ",
-        "Element Spacing (mm)",
-        "Element Directivity (dBi)",
-        "Scan Loss (dB)",
-        "Required D_p (dBi)",
-        "Number of Elements (grid)",
-        "Aperture Diameter (mm)",
-        "Boresight GL (°)",
-        "Scan-edge GL (°)",
+        "Operating Band",
+        "Center Wavelength λ₀",
+        "Highest Freq Wavelength λ_h",
+        "Lowest Freq Wavelength λ_l",
+        "Max Scan Angle θ_sm",
+        "Scan Loss (cos^1.5 model)",
+        "Element Efficiency",
+        "Taper Efficiency",
+        "Required Peak Directivity Dₚ",
+        "Element Spacing d (d/λ_h)",
+        "Element Spacing d (mm)",
+        "Element Directivity Dₑ",
+        "Required No. of Elements",
+        "Array Grid",
+        "Total Elements N",
+        "Achieved Peak Directivity",
+        "Directivity at Scan Edge",
+        "Gain at Scan Edge",
+        "HPBW (boresight)",
+        "First Sidelobe (Square Aperture)",
+        "Grating Lobe @ Boresight",
+        "Grating Lobe @ Max Scan",
+        f"Aperture Size",
     ],
-    f"±{theta_sm:.0f}° (Original)": [
-        f"{theta_sm:.1f}",
-        f"{res['theta_G']:.1f}",
-        f"{res['d_hex_norm']:.4f}",
-        f"{res['d_hex_mm']:.3f}",
-        f"{res['De_dBi']:.2f}",
-        f"{res['SL_dB']:.2f}",
-        f"{res['Dp_dBi']:.2f}",
-        f"{res['N_placed']}",
-        f"{res['diameter_circ_m']*1000:.1f}",
-        f"{res['boresight_GL_deg']:.1f}",
-        f"{res['scan_GL_deg']:.1f}",
-    ],
-    f"±{theta_reduced:.0f}° (Reduced)": [
-        f"{theta_reduced:.1f}",
-        f"{res_red['theta_G']:.1f}",
-        f"{res_red['d_hex_norm']:.4f}",
-        f"{res_red['d_hex_mm']:.3f}",
-        f"{res_red['De_dBi']:.2f}",
-        f"{res_red['SL_dB']:.2f}",
-        f"{res_red['Dp_dBi']:.2f}",
-        f"{res_red['N_placed']}",
-        f"{res_red['diameter_circ_m']*1000:.1f}",
-        f"{res_red['boresight_GL_deg']:.1f}",
-        f"{res_red['scan_GL_deg']:.1f}",
-    ],
+    "Value": [
+        f"{f_low/1e9:.1f} – {f_high/1e9:.1f} GHz",
+        f"{lambda_nom*1000:.2f} mm",
+        f"{lambda_high*1000:.2f} mm",
+        f"{lambda_low*1000:.2f} mm",
+        f"{theta_max_deg:.1f}°",
+        f"{scan_loss_dB:.2f} dB",
+        f"{eta_element}%",
+        f"{eta_taper*100:.1f}%",
+        f"{D_peak_dBi:.2f} dBi",
+        f"{d_over_lambda:.4f} λ_h",
+        f"{d_spacing_mm:.2f} mm",
+        f"{D_el_dBi:.2f} dBi",
+        f"{N_required:.1f}",
+        f"{N_side} × {N_side} (square)",
+        f"{N_total}",
+        f"{D_actual_dBi:.2f} dBi",
+        f"{D_scan_dBi:.2f} dBi",
+        f"{G_scan_dBi:.2f} dBi",
+        f"{hpbw_deg:.2f}°",
+        f"{first_sidelobe_dB} dB",
+        f"{gl_boresight_deg:.1f}°",
+        f"{gl_scan_deg:.1f}°",
+        f"{L_aperture_mm:.1f} × {L_aperture_mm:.1f} mm ({L_aperture*100:.2f} × {L_aperture*100:.2f} cm)",
+    ]
 }
 
-st.dataframe(compare_data, use_container_width=True, hide_index=True)
+import pandas as pd
+df_summary = pd.DataFrame(summary_data)
+st.table(df_summary.style.hide_index())
 
+# ───────────────────────────────────────────────────────────────
+# FOOTER
+# ───────────────────────────────────────────────────────────────
 st.markdown("---")
-
-# Metrics
-if res["N_placed"] > 0 and res_red["N_placed"] > 0:
-    reduction_pct = (1 - res_red["N_placed"] / res["N_placed"]) * 100
-    spacing_increase = (res_red["d_hex_norm"] / res["d_hex_norm"] - 1) * 100
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Element Reduction",
-              f"{abs(reduction_pct):.1f} %",
-              delta=f"{res['N_placed'] - res_red['N_placed']} fewer elements",
-              delta_color="normal" if reduction_pct > 0 else "inverse")
-    c2.metric("Spacing Increase",
-              f"{spacing_increase:.1f} %",
-              delta=f"{res_red['d_hex_mm'] - res['d_hex_mm']:.3f} mm wider")
-    c3.metric("Scan Loss Reduction",
-              f"{res['SL_dB'] - res_red['SL_dB']:.2f} dB saved")
-
-st.markdown("---")
-
-st.markdown("### Reduced-Scan Array Layout")
-col1, col2 = st.columns(2)
-with col1:
-    fig_red = plot_array_layout(
-        res_red["x_pos"], res_red["y_pos"], res_red["weights"],
-        res_red["R_circ"], res_red["d_hex_m"],
-        title=f"±{theta_reduced:.0f}° Scan — {res_red['N_placed']} elements")
-    st.pyplot(fig_red, use_container_width=True)
-with col2:
-    fig_pat_red = plot_radiation_pattern(
-        res_red["x_pos"], res_red["y_pos"], res_red["weights"],
-        res_red["lambda_c"], res_red["Dp_placed_dBi"],
-        title=f"Pattern — ±{theta_reduced:.0f}° Scan")
-    st.pyplot(fig_pat_red, use_container_width=True)
-
-st.info(
-    f"**Summary:** Reducing the scan angle from ±{theta_sm:.0f}° to ±{theta_reduced:.0f}° "
-    f"allows larger element spacing ({res_red['d_hex_norm']:.3f}λ vs {res['d_hex_norm']:.3f}λ), "
-    f"which increases element directivity and reduces the total element count from "
-    f"**{res['N_placed']}** to **{res_red['N_placed']}** "
-    f"(a **{abs(reduction_pct):.1f}%** reduction). "
-    f"This translates directly to fewer phase shifters, a simpler feed network, "
-    f"lower power consumption, reduced weight, and significant cost savings."
+st.caption(
+    
+    "**CICAD 2025 Internship Assignment** — Phased Array Problem 1"
 )
-
-st.markdown("---")
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SECTION — Key Design Equations
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-st.subheader("📚  Key Design Equations")
-st.markdown(r"""
-**Hexagonal lattice spacing** — *Eq. (2)*:
-
-$$\frac{d_h}{\lambda_h} \leq \frac{1.1547}{\sin\theta_{sm} + \sin\theta_G}$$
-
-**Array peak directivity** — *Eq. (3)*:
-
-$$D_p = 10\log_{10}(N) + 10\log_{10}\!\left[\eta_e \frac{4\pi A_e}{\lambda_l^2}\right]$$
-
-**Number of elements** — *Eq. (4)*:
-
-$$N = 10^{\,0.1\,D_p\;-\;0.1\,D_e}$$
-
-**Required peak directivity** — *Eq. (5)*:
-
-$$D_p = G_{\min} + L_s + SL + GL_{pe} + T_L + X + I_m$$
-
-**Scan loss (directive elements)** — *Eq. (6)*:
-
-$$SL = 3\left(\frac{\theta_{sm}}{0.5\,\theta_3}\right)^2$$
-
-**Element half-power beamwidth** — *Eq. (7)*:
-
-$$\theta_3 = A\,\frac{\lambda_h}{d_e}$$
-
-**Taper efficiency** — *Eq. (10)*:
-
-$$\eta = 75\,\frac{(1+T)^2}{1+T+T^2}\;\;\%$$
-
----
-    """)
-
-# ── Footer ────────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.caption("CICAD 2025 Assignment — Phased Array Problem 2")
