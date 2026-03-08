@@ -24,7 +24,7 @@ c = 299792458.0  # speed of light, m/s
 # PAGE CONFIG
 # ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Phased Array Antenna Designer",
+    page_title="Phased Array Problem 1",
     page_icon="📡",
     layout="wide",
 )
