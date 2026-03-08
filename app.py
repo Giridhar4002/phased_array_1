@@ -1,14 +1,11 @@
 
 
 """
-Phased Array Antenna Design Tool — CICAD 2025 Problem 1
-=========================================================
-Solves the design of a square-grid, square-aperture phased array
-with microstrip patch elements at 14.5 GHz ± 1 GHz.
-
-Equations follow:
-  S. Rao & C. Ostroot, "Design Principles and Guidelines for
-  Phased Array and Reflector Antennas," IEEE AP-Mag, Apr 2020.
+Phased Array Problem 1
+Given Parameters
+Specifications: Frequency = 14.5 ± 1 GHz (13.5 -15.5 GHz), Square grid,
+Square aperture, Microstrip patch antenna (ηe = 90%), Max scan angle = 45◦,
+Minimum gain over scan range = 20 dBi, Uniform illumination.
 """
 
 import streamlit as st
